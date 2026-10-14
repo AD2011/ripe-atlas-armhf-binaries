@@ -1,0 +1,96 @@
+name: Build ARMHF packages from RIPE Atlas releases
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: "Official ripe-atlas-software-probe release tag (blank uses latest)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: armhf-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@v4
+
+      - name: Select the official RIPE Atlas release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.source_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$REQUESTED_TAG" ]]; then
+            source_tag="$REQUESTED_TAG"
+          else
+            source_tag="$(gh api repos/RIPE-NCC/ripe-atlas-software-probe/releases/latest --jq .tag_name)"
+          fi
+          if [[ ! "$source_tag" =~ ^[0-9]+$ ]]; then
+            echo "Expected a numeric stable RIPE release tag, got: $source_tag" >&2
+            exit 1
+          fi
+          release_tag="armhf-$source_tag"
+          echo "source_tag=$source_tag" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$release_tag" >/dev/null 2>&1; then
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+            echo "Release $release_tag already exists."
+          else
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up QEMU for ARMHF
+        if: steps.release.outputs.already_published != 'true'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+
+      - name: Build Debian Trixie ARMHF packages
+        if: steps.release.outputs.already_published != 'true'
+        env:
+          SOURCE_TAG: ${{ steps.release.outputs.source_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          docker run --rm --platform linux/arm/v7 \
+            -e SOURCE_TAG \
+            -v "$GITHUB_WORKSPACE/dist:/out" \
+            debian:trixie bash -euxo pipefail -c '
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                autoconf automake autotools-dev build-essential debhelper git libssl-dev \
+                net-tools psmisc systemd ca-certificates
+              git clone --depth 1 --branch "$SOURCE_TAG" \
+                https://github.com/RIPE-NCC/ripe-atlas-software-probe.git /build/source
+              cd /build/source
+              dpkg-buildpackage -b -us -uc
+              cp /build/ripe-atlas-*.deb /out/
+            '
+          test -n "$(find dist -maxdepth 1 -name 'ripe-atlas-*.deb' -print -quit)"
+          (cd dist && sha256sum ripe-atlas-*.deb > SHA256SUMS)
+
+      - name: Publish the packages as a GitHub release
+        if: steps.release.outputs.already_published != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_TAG: ${{ steps.release.outputs.source_tag }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" dist/* \
+            --title "RIPE Atlas ARMHF $SOURCE_TAG" \
+            --notes "ARMHF Debian Trixie packages built from the official [RIPE Atlas software probe $SOURCE_TAG](https://github.com/RIPE-NCC/ripe-atlas-software-probe/releases/tag/$SOURCE_TAG). The common and probe packages are for software probes. The anchor package is only for RIPE Atlas anchors."
