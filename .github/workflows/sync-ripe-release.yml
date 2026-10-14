@@ -73,6 +73,7 @@ jobs:
               DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
                 autoconf automake autotools-dev build-essential debhelper git libssl-dev \
                 net-tools psmisc systemd ca-certificates
+              mkdir -p /build
               git clone --depth 1 --branch "$SOURCE_TAG" \
                 https://github.com/RIPE-NCC/ripe-atlas-software-probe.git /build/source
               cd /build/source
